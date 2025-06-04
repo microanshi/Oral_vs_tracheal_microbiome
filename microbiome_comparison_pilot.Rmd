@@ -1,0 +1,393 @@
+---
+title: "microbiome_comparison_pilot"
+author: "Anshika Gupta"
+date: "`r Sys.Date()`"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+setwd("/Users/ANG425/Desktop/Cooper_lab-AG/LTACH/All_LTACH_emu_taxa_results/oral_tracheal_pilot_may2025/")
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+## library install 
+
+```{r LibraryInstall}
+library(tidyverse)
+library(phyloseq)
+library(vegan)
+library(ape)
+library(cowplot)
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(RColorBrewer)
+library(microbiome)
+library(ggpubr)
+library(forcats)
+library(viridis)
+```
+
+
+## 1. input datafiles 
+```{r input_datafiles, echo=FALSE}
+
+taxa_meta <- read.csv("oral_tracheal_2025.csv") #microbiome output/taxa and abundance
+
+metadata_to_use <- read.csv("oral_barcode.csv") #metadata
+
+```
+
+## 2. plot the number of reads that were unmapped/unassigned for each sample
+```{r}
+str(taxa_meta)
+
+#convert HSID/samplename to character instead of int
+taxa_meta$HSID <- as.character(taxa_meta$HSID)
+
+#add new column containing total reads per sample
+unmapped <- taxa_meta %>%
+  group_by(HSID) %>%
+  mutate(total_read_count = sum(estimated.counts))
+
+#calculate rel abundance of reads 
+unmapped <- unmapped %>%
+  mutate(total_rel_abun = 100*(estimated.counts/total_read_count))
+
+#filter unmapped and unassigned reads
+unmapped_only <- unmapped %>%
+  filter(tax_id %in% c("unmapped", "mapped_unclassified"))
+
+#convert HSID in metadata to character
+metadata_to_use$HSID <- as.character(metadata_to_use$HSID)
+
+
+#plot
+ggplot(data = unmapped_only, aes(x= reorder(HSID, total_rel_abun),y=total_rel_abun, fill=sample_type)) +
+  geom_bar(stat = "identity") +
+  facet_wrap(~tax_id, scales = "free") + 
+  labs(y= "% relative abundance", x="sample id")+
+  theme_minimal()+
+  theme(axis.text.x = element_text(angle = 45, color = "black", size = 7, hjust = 1, vjust = 1),
+        axis.text.y = element_text(color = "black", size = 8),
+        axis.line = element_line(linewidth = 0.5, color = "black"),
+        panel.grid = element_blank(),
+        axis.ticks = element_line(color = "black", linewidth = 0.2)) 
+```
+
+
+## 3. extract abundance, taxa, and metadata info to make phyloseq object
+
+### 3.1 taxa table
+```{r pre-processing for phyloseq obj, echo=FALSE}
+taxa_df <- taxa_meta %>%
+  select(tax_id, superkingdom, phylum, class, order, family, genus, species, species.group) %>%
+  filter(tax_id != 'unassigned') %>%
+  filter(!tax_id %in% c('unmapped', 'mapped_unclassified'))
+
+taxa_df <- taxa_df %>% distinct(tax_id, .keep_all = TRUE)  #additional arguments for distinct since some tax_id have slight differences in species columns which is counted as unique when just using distinct
+
+rownames(taxa_df) <- taxa_df$tax_id
+taxa_df <- taxa_df[,-1] #put taxid as rownames, not as a separate column
+
+```
+
+### 2.2 metadata edit with sample name as rownames
+
+```{r, echo=FALSE}
+colnames(metadata_to_use)
+
+metadata_for_taxa_meta <- metadata_to_use %>%
+  select(c("HSID", "sample_type", "LTACH_ID"))
+
+metadata_for_taxa_meta <- distinct(metadata_for_taxa_meta, .keep_all = TRUE) 
+
+#metadata_to_use <- distinct(metadata_to_use) #remove duplicate rows
+#write.csv(metadata_to_use, "workingmetadata_jan15.csv", row.names = FALSE)
+  #select(-X) #remove unwanted column
+rownames(metadata_for_taxa_meta) <- (metadata_for_taxa_meta$HSID)
+
+metadata_for_taxa_meta <- metadata_for_taxa_meta[,-1] #remove SampleName column since it is now set as metadata
+```
+
+
+### 2.3 Abundance data using rel abundance
+```{r, echo=FALSE}
+
+abund_data <- taxa_meta %>%
+  select(tax_id, species, estimated.counts, HSID, abundance)
+
+#filter estimated counts column 
+abund_data_rel <- abund_data %>%
+  select(-estimated.counts) %>%
+  filter(!tax_id %in% c("unassigned", "unmapped", "mapped_unclassified"))
+
+##identify duplicates, if they exist. in this file we don't have duplicates
+# abund_data_rel |> 
+#   dplyr::summarise(n = dplyr::n(), .by = c(tax_id, species, HSID)) |> 
+#   dplyr::filter(n > 1L)
+# 
+# ## remove duplicates for now
+# abund_data_rel <- abund_data_rel %>%
+#   filter(HSID != "73547") %>%
+#   filter(HSID != "73545") 
+#   # filter(HSID != "74614")
+# 
+# ## keep only 1 set of rows, i.e. 1 set of data
+# abund_data_rel <- abund_data_rel %>%
+#   distinct(tax_id, species, HSID, .keep_all = TRUE)
+
+##multiply rel abundance by 100
+#abund_data_rel <- abund_data_rel %>%
+  #mutate(abundance = 100*abundance)
+
+aggregate(abund_data_rel$abundance, list(abund_data_rel$HSID), FUN=sum) # to check if relative abundances for each sample sum to 100%
+
+## transform data such that taxa are rows, and samples are column name
+abund_data_rel_wide <- abund_data_rel %>%
+  pivot_wider(id_cols = c(tax_id, species),
+                names_from = HSID,
+              values_from = abundance)
+
+## replace all NAs with 0s
+abund_data_rel_wide[is.na(abund_data_rel_wide)] <- 0
+
+## Convert the tibble to a numeric matrix (excluding the 'species' and 'taxid' column)
+abund_data_relwide_num1 <- as.matrix(abund_data_rel_wide[, -1])
+abund_data_relwide_num1 <- as.matrix(abund_data_relwide_num1[, -1])
+## Confirm the matrix is numeric
+abund_data_relwide_num1 <- apply(abund_data_relwide_num1, 2, as.numeric)
+
+## Add back taxid and species columns to the data
+new_columns <- abund_data_rel[, c("tax_id", "species")]
+## remove duplicate species names and taxid
+new_columns <- new_columns %>% distinct()
+
+## combine tax_id column back to cleaned up read count df
+abund_data_relwide_num1 <- cbind(new_columns, abund_data_relwide_num1)
+abund_data_relwide_num1 <- abund_data_relwide_num1[,-2] #remove species column. not required
+
+rownames(abund_data_relwide_num1) <- abund_data_relwide_num1$tax_id #set tax_id as rownames
+abund_data_relwide_num1 <- abund_data_relwide_num1[,-1] #after rownames as tax_id, remove tax"_id as separate column
+
+#remove unwanted dfs
+rm(abund_data_rel_wide)
+
+```
+
+### 2.4 phyloseq rel abundance
+```{r}
+abund_rel = otu_table(abund_data_relwide_num1, taxa_are_rows = TRUE)
+TAX = tax_table(as.matrix(taxa_df))
+sampledata = sample_data(metadata_for_taxa_meta)
+
+physeq_rel <- phyloseq(abund_rel, TAX, sampledata)
+```
+
+
+## 3.subset phyloseq data based on samples sequenced for population diversity
+```{r}
+samples_seq_list <- c("LTACH-008", "LTACH-026", "LTACH-029", "LTACH-030", "LTACH-037",
+                      "LTACH-048", "LTACH-058", "LTACH-060", "LTACH-063", "LTACH-065", "LTACH-074")
+
+sample_subset <- subset_samples(physeq_rel, LTACH_ID %in% samples_seq_list) #week1 containing data in a phyloseq object
+
+samples_df <- psmelt(sample_subset)
+
+# #for quick taxa visulization
+# plot_bar(sample_subset, fill = "species") +
+#   scale_y_continuous(0,1) +
+#   facet_wrap(~Sample, nrow = 4) +
+#   guides(fill = guide_legend(ncol = 2))
+
+```
+
+## 4. analysis
+
+### 4.1 data cleanup for plotting plots
+```{r}
+#convert phyloseq object to df from plotting 
+sample_set <- psmelt(physeq_rel)
+colnames(sample_set)
+
+sample_subset_0.02 <- sample_set %>%
+  mutate(species = if_else(Abundance <= 0.02 , "species<2%", species))
+
+#reaarnage data such that oral or tracheal label is next to LTACH_ID
+sample_subset_0.02 <- sample_subset_0.02 %>%
+  mutate(
+    sample_group = paste(LTACH_ID, sample_type, sep = "_")     # Create a new grouping variable (e.g., "LTACH_1_oral", "LTACH_1_tracheal")
+, Sample = reorder(Sample, as.numeric(factor(LTACH_ID))))
+
+```
+
+### 4.2 color map
+```{r}
+#list of pathogens
+pathogens <- c("Acinetobacter baumannii", "Staphylococcus aureus", "Pseudomonas aeruginosa", "Stenotrophomonas maltophilia", 
+               "Klebsiella aerogenes", "Escherichia coli", "Citrobacter freundii", "Proteus mirabilis", "Enterococcus faecium", "Klebsiella pneumoniae"
+               #"Enterobacter hormaechei", #"Achromobacter xylosoxidans", "Klebsiella oxytoca","Providencia rettgeri", "Enterococcus faecium"
+)
+
+#colors
+new_colors <- c(
+  "Staphylococcus aureus" = "goldenrod",  # New color
+  "Pseudomonas aeruginosa" = "darkgreen",
+  "Klebsiella aerogenes" = '#e41a1c', 
+  "Stenotrophomonas maltophilia" = 'magenta',
+  #"Klebsiella pneumoniae" = "coral4",
+  "Escherichia coli" = 'cyan',
+  #"Serratia marcescens" = "#542788",
+  "Citrobacter freundii" = "#542788",
+  "Klebsiella pneumoniae" = 'blue', 
+  "Acinetobacter baumannii" = "#ff7f00",
+  "Proteus mirabilis" = "greenyellow", 
+  "Enterococcus faecium" = "navyblue",
+  "Corynebacterium striatum" = "thistle1",
+  #"Moraxella catarrhalis" = "lightsteelblue3",
+  "species<2%" = "grey"
+)
+
+#number of colors needed based on mumber of species needed
+unique(sample_subset_0.02$species) #59
+
+non_pathogens <- setdiff(unique(sample_subset_0.02[["species"]]), pathogens)
+# Function to assign bright colors to pathogens and pastel colors to non-pathogens, even for large numbers
+reorder_species_colors <- function(df, species_column, pathogens, new_colors) {
+  # Generate bright colors for pathogens using the "Set1" palette
+  bright_colors <- brewer.pal(min(length(pathogens), 11), "Spectral")
+  
+  # Generate pastel colors for non-pathogens using a color ramp if there are more non-pathogens than the "Pastel1" palette can handle
+  non_pathogens <- setdiff(unique(df[[species_column]]), pathogens)
+  if (length(non_pathogens) > 9) {
+    # Use colorRampPalette to create more pastel colors
+    pastel_colors <- colorRampPalette(brewer.pal(12, "Paired"))(length(non_pathogens))
+  } else {
+    pastel_colors <- brewer.pal(length(non_pathogens), "Paired")
+  }
+  
+  # Assign bright colors to pathogens and pastel colors to non-pathogens
+  color_mapping <- setNames(
+    c(pastel_colors, bright_colors),  # Pastels first, Bright colors last
+    c(non_pathogens, pathogens)
+  )
+  
+  # If any custom new_colors are provided, overwrite the default mapping for those species
+  color_mapping[names(new_colors)] <- new_colors
+  
+  # Reorder the species factor: Non-pathogens first, pathogens last
+  df[[species_column]] <- factor(
+    df[[species_column]],
+    levels = c(non_pathogens, pathogens)  # Non-pathogens at the top, pathogens at the bottom
+  )
+  
+  return(list(df = df, color_mapping = color_mapping))
+}
+
+# Apply the function to the dataframe and get the updated dataframe and color mapping
+result <- reorder_species_colors(sample_subset_0.02, "species", pathogens, new_colors)
+sample_subset_0.02 <- result$df #ensures ordering is incorporated into the week1_df
+color_mapping_pastel <- result$color_mapping #ensures coloring is incorporated into the week1_df
+
+```
+
+### 4.3 stacked abundance plot
+```{r}
+#plot
+sample_plot <- ggplot(sample_subset_0.02, aes(x = LTACH_ID, y = Abundance, fill = species)) +
+  geom_bar(stat = "identity", position = "stack") +
+  scale_fill_manual(values = color_mapping_pastel) +
+  facet_grid(. ~ sample_type, scales = "free_x", space = "free_x") +  # Side-by-side
+  theme_minimal() +
+  labs(x = "LTACH_ID") + 
+  theme(
+    plot.title = element_text(hjust = 0.5, face = 'bold', color = 'darkblue', size = 20),
+    axis.title.x = element_blank(),
+    axis.text.x = element_text(angle=45, hjust = 1.0, vjust = 1.0, size = 13, color = "black"),  # Improved text alignment
+    axis.text.y = element_text(size = 14, color = "black"),
+    axis.title.y = element_text(size = 19, color = "black", margin = margin(r = 10)),  # Added margin
+    legend.key.size = unit(0.6, "cm"),
+    legend.title = element_text(size = 13, face = 'bold'),
+    legend.text = element_text(size = 14),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.spacing.x = unit(1, "lines"),
+    axis.line = element_line(colour = "black"),
+    axis.ticks = element_line(size = 0.5),
+    legend.position = "bottom",
+    legend.key.spacing = unit(0.05, "cm"),
+    strip.text = element_text(size = 14),
+    strip.background = element_blank()  # Remove facet strip background
+  ) + 
+  guides(fill=guide_legend(nrow = 12, keyheight = 0.3, keywidth = 0.5)) 
+
+
+sample_plot
+#ggsave("microbiome_time.pdf", plot = sample_plot, dpi = 300, width = 19, height = 11)
+```
+
+### 4.4 PCoA plot
+```{r}
+#jaccard distance looks for presence/absence betweent eh two sites
+dist_jaccard <- phyloseq::distance(physeq_rel, method = "jaccard")
+pcoa_result <- ordinate(physeq_rel, method = "PCoA", distance = dist_jaccard)
+
+plot_ordination(physeq_rel, pcoa_result, color = "sample_type") + stat_ellipse() +
+  labs(title = "Jaccard distance dissimilarity")
+
+#
+```
+
+
+
+<!-- ### 4.4 PCA plot -->
+<!-- ```{r} -->
+<!-- #Normalize using CLR (recommended for microbiome PCA) -->
+<!-- ps_clr <- microbiome::transform(physeq_rel, "clr")  # Requires `microbiome` package -->
+
+<!-- # Extract OTU table (samples x taxa) -->
+<!-- otu_mat <- t(otu_table(ps_clr))  # Transpose for vegan -->
+
+<!-- # Run PCA -->
+<!-- pca_result <- rda(otu_mat)  # Uses vegan::rda() for PCA -->
+
+<!-- # Extract variance explained -->
+<!-- variance <- round(100 * summary(pca_result)$cont$importance[2, 1:2], 1)  # % variance for PC1 & PC2 -->
+
+<!-- # Get sample metadata -->
+<!-- sample_data <- data.frame(sample_data(ps_clr)) -->
+
+<!-- # Add PCA coordinates to metadata -->
+<!-- sample_data$PC1 <- scores(pca_result, display = "sites")[, 1] -->
+<!-- sample_data$PC2 <- scores(pca_result, display = "sites")[, 2] -->
+
+<!-- # Plot -->
+<!-- pca_plot <- ggplot(sample_data, aes(x = PC1, y = PC2, color = sample_type)) + -->
+<!--   geom_point(size = 4, alpha = 0.8) + -->
+<!--   stat_ellipse(aes(group = sample_type), level = 0.95, linetype = 2) +  # 95% confidence ellipses -->
+<!--   scale_color_manual(values = c("oral" = "blue", "tracheal" = "red")) + -->
+<!--   labs( -->
+<!--     x = paste0("PC1 (", variance[1], "%)"), -->
+<!--     y = paste0("PC2 (", variance[2], "%)"), -->
+<!--     title = "PCA of Oral vs. Tracheal Samples", -->
+<!--     color = "Sample Type" -->
+<!--   ) + -->
+<!--   theme_minimal() + -->
+<!--   theme( -->
+<!--     plot.title = element_text(hjust = 0.5, face = "bold"), -->
+<!--     legend.position = "bottom" -->
+<!--   ) -->
+
+<!-- print(pca_plot) -->
+<!-- ``` -->
+
+
+
