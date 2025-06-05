@@ -62,22 +62,32 @@ unmapped <- taxa_meta %>%
 unmapped <- unmapped %>%
   mutate(total_rel_abun = 100*(estimated.counts/total_read_count))
 
+#calculate total read count of assigned reads
+unmapped <- unmapped %>%
+  group_by(HSID) %>%
+  mutate(unassigned_read_count = )
+  mutate(assigned_read_count = (sum(estimated.counts)- sum()))
+
 #filter unmapped and unassigned reads
 unmapped_only <- unmapped %>%
-  filter(tax_id %in% c("unmapped", "mapped_unclassified"))
+  filter(tax_id %in% c("unmapped", "mapped_unclassified")) %>%
+  group_by(HSID) %>%
+  mutate(unmapped_read = sum(estimated.counts))
 
-#convert HSID in metadata to character
-metadata_to_use$HSID <- as.character(metadata_to_use$HSID)
+unmapped_only <- unmapped_only %>%
+  mutate(assigned_read_count = total_read_count - unmapped_read)
+
 
 
 #plot
-ggplot(data = unmapped_only, aes(x= reorder(HSID, total_rel_abun),y=total_rel_abun, fill=sample_type)) +
+ggplot(data = unmapped_only, aes(x= reorder(HSID, assigned_read_count),y=assigned_read_count, fill=sample_type)) +
   geom_bar(stat = "identity") +
-  facet_wrap(~tax_id, scales = "free") + 
-  labs(y= "% relative abundance", x="sample id")+
+  #facet_wrap(~tax_id, scales = "free") + 
+  labs(y= "Assigned read count", x="sample id")+
+  scale_y_continuous(breaks = c(0,150000, 5000, 20000, 50000, 100000))+
   theme_minimal()+
-  theme(axis.text.x = element_text(angle = 45, color = "black", size = 7, hjust = 1, vjust = 1),
-        axis.text.y = element_text(color = "black", size = 8),
+  theme(axis.text.x = element_text(angle = 45, color = "black", size = 8, hjust = 1, vjust = 1),
+        axis.text.y = element_text(color = "black", size = 10),
         axis.line = element_line(linewidth = 0.5, color = "black"),
         panel.grid = element_blank(),
         axis.ticks = element_line(color = "black", linewidth = 0.2)) 
