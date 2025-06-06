@@ -78,7 +78,6 @@ unmapped_only <- unmapped_only %>%
   mutate(assigned_read_count = total_read_count - unmapped_read)
 
 
-
 #plot
 ggplot(data = unmapped_only, aes(x= reorder(HSID, assigned_read_count),y=assigned_read_count, fill=sample_type)) +
   geom_bar(stat = "identity") +
